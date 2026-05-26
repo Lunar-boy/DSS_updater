@@ -72,35 +72,9 @@ python3 -m pip install -e .[dev]
 
 ## Run
 
-### Console entry point
 
-```bash
-datashare-stack-update --datashare-dir ~/Desktop/Datashare --repo ~/Desktop/barnard-ci
-```
 
-### Run from source directly
 
-```bash
-python3 scripts/update_datashare_software_stack.py --datashare-dir ~/Desktop/Datashare --repo ~/Desktop/barnard-ci
-```
-
-### Cluster-only run
-
-```bash
-datashare-stack-update --datashare-dir ~/Desktop/Datashare --repo ~/Desktop/barnard-ci --cluster barnard
-```
-
-### Dry-run
-
-```bash
-datashare-stack-update --datashare-dir ~/Desktop/Datashare --repo ~/Desktop/barnard-ci --dry-run
-```
-
-`--dry-run` computes matches and reporting but does not modify files.
-
-## Upload Modes
-
-Upload is explicit and separated by mode.
 
 ### Authenticated account WebDAV mode
 
