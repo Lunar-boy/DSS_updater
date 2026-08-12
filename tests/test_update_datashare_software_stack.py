@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from dss_updater.ods import ODSValidationError, load_workbook, save_workbook_saf
 from dss_updater.reconciliation import infer_cluster_from_filename, process_ods_file
 from dss_updater.reporting import serialize_report
 from dss_updater.safety import (
+    DEFAULT_BACKUP_DIR,
     AmbiguousWorkbookError,
     ConcurrentModificationError,
     LibreOfficeLockError,
@@ -29,6 +31,12 @@ from dss_updater.safety import (
     fingerprint_file,
     process_lock,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_default_backup_home(monkeypatch, tmp_path: Path):
+    """Keep default backup writes inside each test's temporary directory."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -456,6 +464,8 @@ def test_idempotent_second_run_has_no_changes(tmp_path: Path):
     )
     assert first_changed is True
     assert first_stats[0].updated_rows == 1
+    backup_dir = Path(DEFAULT_BACKUP_DIR).expanduser()
+    assert len(list(backup_dir.iterdir())) == 1
 
     second_stats, second_reports, second_changed = process_ods_file(
         file_path=ods_path,
@@ -467,6 +477,7 @@ def test_idempotent_second_run_has_no_changes(tmp_path: Path):
     assert second_changed is False
     assert second_stats[0].updated_rows == 0
     assert any(report.action == "unchanged" for report in second_reports)
+    assert len(list(backup_dir.iterdir())) == 1
 
 
 def test_dry_run_reports_changes_without_writing_or_backing_up(tmp_path: Path):
@@ -505,6 +516,7 @@ def test_dry_run_reports_changes_without_writing_or_backing_up(tmp_path: Path):
     assert any(report.action == "updated" for report in reports)
     assert ods_path.read_bytes() == before
     assert not list(tmp_path.glob("Software_Stack_Barnard.ods.bak.*"))
+    assert not (Path(DEFAULT_BACKUP_DIR).expanduser()).exists()
 
 
 def test_cli_dry_run_summary_and_default_report_location(
@@ -531,8 +543,6 @@ def test_cli_dry_run_summary_and_default_report_location(
         },
     )
     before = ods_path.read_bytes()
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-
     exit_code = updater.main(
         [
             "--datashare-dir",
@@ -562,6 +572,7 @@ def test_cli_dry_run_summary_and_default_report_location(
     assert payload["rows"][0]["action"] == "updated"
     assert ods_path.read_bytes() == before
     assert not list(datashare_dir.glob("*.bak.*"))
+    assert not (tmp_path / "home" / "dss_updater" / "bak").exists()
     assert not list(datashare_dir.glob("dss_update_report_*.json"))
 
 
@@ -642,6 +653,7 @@ def test_changed_ods_is_backed_up_and_atomically_replaced(tmp_path: Path):
             ]
         },
     )
+    original_bytes = ods_path.read_bytes()
     original_inode = ods_path.stat().st_ino
 
     _, _, changed = process_ods_file(
@@ -654,7 +666,15 @@ def test_changed_ods_is_backed_up_and_atomically_replaced(tmp_path: Path):
 
     assert changed is True
     assert ods_path.stat().st_ino != original_inode
-    assert len(list(tmp_path.glob("Software_Stack_Barnard.ods.bak.*"))) == 1
+    assert not list(tmp_path.glob("Software_Stack_Barnard.ods.bak.*"))
+    backup_dir = tmp_path / "home" / "dss_updater" / "bak"
+    backups = list(backup_dir.iterdir())
+    assert len(backups) == 1
+    assert re.fullmatch(
+        r"Software_Stack_Barnard\.ods\.bak\.\d{8}_\d{6}_\d{6}",
+        backups[0].name,
+    )
+    assert backups[0].read_bytes() == original_bytes
     assert not list(tmp_path.glob(".Software_Stack_Barnard.ods.*.tmp"))
 
 

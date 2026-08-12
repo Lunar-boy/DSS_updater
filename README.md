@@ -66,7 +66,7 @@ save to same-directory temporary ODS
   -> validate ZIP integrity and reopen with odfpy
   -> re-check conflicts, workbook variants, and LibreOffice locks
   -> confirm the original fingerprint is unchanged
-  -> back up the original
+  -> back up the original to ~/dss_updater/bak/
   -> confirm the fingerprint again
   -> atomic os.replace()
   -> reopen and validate the installed ODS
@@ -110,6 +110,7 @@ The defaults are:
 - Datashare directory: `~/Nextcloud/Shared/Software-Stack for all Cluster`
 - barnard-ci repository: `~/Desktop/barnard-ci`
 - Report directory: `~/dss_updater/reports/`
+- Backup directory: `~/dss_updater/bak/`
 
 Preview a run without changing ODS files:
 
@@ -139,8 +140,12 @@ credentials.
 ## Backups and reports
 
 Before a changed workbook is replaced, the original is copied to
-`<workbook>.bak.<timestamp>`. ODS output is written to a temporary file in the same directory
-and atomically renamed into place so the sync client does not observe a partially written ODS.
+`~/dss_updater/bak/<workbook>.bak.<timestamp>`; for example,
+`~/dss_updater/bak/Software_Stack_Barnard.ods.bak.20260812_212000_123456`. The backup directory
+is created automatically when a workbook is going to be replaced. No backup is created for an
+unchanged workbook or during a dry run. ODS output is still written to a temporary file beside
+the source workbook and atomically renamed into place so the sync client does not observe a
+partially written ODS.
 
 By default, JSON reports are created as
 `~/dss_updater/reports/dss_update_report_YYYYMMDD_HHMMSS.json`; the report directory is

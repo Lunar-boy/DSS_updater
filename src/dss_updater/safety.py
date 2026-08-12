@@ -20,6 +20,7 @@ ODS_PATTERN = "Software_Stack_*.ods"
 CONFLICT_MARKER = "conflicted copy"
 WORKBOOK_PREFIX = "software_stack_"
 CANONICAL_WORKBOOK_PATTERN = re.compile(r"^Software_Stack_([A-Za-z]+)\.ods$")
+DEFAULT_BACKUP_DIR = "~/dss_updater/bak"
 
 
 class SafetyError(RuntimeError):
@@ -219,7 +220,9 @@ def discover_ods_files(directory: Path) -> list[Path]:
 
 def backup_file(path: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    backup_path = path.with_suffix(path.suffix + f".bak.{timestamp}")
+    backup_dir = Path(DEFAULT_BACKUP_DIR).expanduser()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"{path.name}.bak.{timestamp}"
     shutil.copy2(path, backup_path)
     return backup_path
 
