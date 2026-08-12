@@ -109,6 +109,7 @@ The defaults are:
 
 - Datashare directory: `~/Nextcloud/Shared/Software-Stack for all Cluster`
 - barnard-ci repository: `~/Desktop/barnard-ci`
+- Report directory: `~/dss_updater/reports/`
 
 Preview a run without changing ODS files:
 
@@ -141,8 +142,12 @@ Before a changed workbook is replaced, the original is copied to
 `<workbook>.bak.<timestamp>`. ODS output is written to a temporary file in the same directory
 and atomically renamed into place so the sync client does not observe a partially written ODS.
 
+By default, JSON reports are created as
+`~/dss_updater/reports/dss_update_report_YYYYMMDD_HHMMSS.json`; the report directory is
+created automatically. Use `--report-out` to override the report path.
+
 The JSON report contains sheet-level counts and row-level match actions and reasons. Dry runs
-still write a report but never write or back up a workbook.
+report the rows and files that would be updated, but never write or back up a workbook.
 
 ## Package architecture
 

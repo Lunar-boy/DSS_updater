@@ -21,6 +21,7 @@ from .safety import (
 
 DEFAULT_DATASHARE_DIR = "~/Nextcloud/Shared/Software-Stack for all Cluster"
 DEFAULT_REPO_DIR = "~/Desktop/barnard-ci"
+DEFAULT_REPORT_DIR = "~/dss_updater/reports"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -64,7 +65,7 @@ def _run_locked(args: argparse.Namespace, datashare_dir: Path, repo_root: Path) 
     alias_map = {normalize_name(source): normalize_name(target) for source, target in DEFAULT_ALIAS_MAP.items()}
     all_stats: list[SheetStats] = []
     all_reports: list[RowReport] = []
-    updated_files: list[Path] = []
+    changed_files: list[Path] = []
     for file_path in ods_files:
         cluster = infer_cluster_from_filename(file_path)
         if not cluster:
@@ -87,19 +88,30 @@ def _run_locked(args: argparse.Namespace, datashare_dir: Path, repo_root: Path) 
         all_stats.extend(stats)
         all_reports.extend(reports)
         if changed:
-            updated_files.append(file_path)
+            changed_files.append(file_path)
 
     report_out = (
         Path(args.report_out).expanduser().resolve()
         if args.report_out
-        else datashare_dir / f"dss_update_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        else (
+            Path(DEFAULT_REPORT_DIR).expanduser().resolve()
+            / f"dss_update_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
     )
     serialize_report(all_stats, all_reports, report_out)
-    print("=== DSS Local ODS Reconciliation Summary ===")
+    if args.dry_run:
+        print("=== DSS Dry-Run Reconciliation Summary ===")
+    else:
+        print("=== DSS Local ODS Reconciliation Summary ===")
     print(f"Sheets processed: {len(all_stats)}")
     print(f"Rows scanned: {sum(stat.rows_scanned for stat in all_stats)}")
-    print(f"Rows updated: {sum(stat.updated_rows for stat in all_stats)}")
-    print(f"Files updated: {len(updated_files)}")
+    if args.dry_run:
+        print(f"Rows that would be updated: {sum(stat.updated_rows for stat in all_stats)}")
+        print(f"Files that would be updated: {len(changed_files)}")
+        print("Files written: 0")
+    else:
+        print(f"Rows updated: {sum(stat.updated_rows for stat in all_stats)}")
+        print(f"Files updated: {len(changed_files)}")
     print(f"Report written: {report_out}")
     for stat in all_stats:
         print(

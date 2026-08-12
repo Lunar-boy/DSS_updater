@@ -6,7 +6,12 @@ import pytest
 
 import dss_updater.cli as updater
 import dss_updater.ods as ods_module
-from dss_updater.cli import DEFAULT_DATASHARE_DIR, DEFAULT_REPO_DIR, build_arg_parser
+from dss_updater.cli import (
+    DEFAULT_DATASHARE_DIR,
+    DEFAULT_REPO_DIR,
+    DEFAULT_REPORT_DIR,
+    build_arg_parser,
+)
 from dss_updater.ods import ODSValidationError, load_workbook, save_workbook_safely
 from dss_updater.reconciliation import infer_cluster_from_filename, process_ods_file
 from dss_updater.reporting import serialize_report
@@ -464,7 +469,7 @@ def test_idempotent_second_run_has_no_changes(tmp_path: Path):
     assert any(report.action == "unchanged" for report in second_reports)
 
 
-def test_dry_run_does_not_write_changes(tmp_path: Path):
+def test_dry_run_reports_changes_without_writing_or_backing_up(tmp_path: Path):
     repo = _make_repo(tmp_path)
     _add_easyconfigs(
         repo,
@@ -486,7 +491,7 @@ def test_dry_run_does_not_write_changes(tmp_path: Path):
     )
     before = ods_path.read_bytes()
 
-    stats, _, changed = process_ods_file(
+    stats, reports, changed = process_ods_file(
         file_path=ods_path,
         cluster="barnard",
         repo_root=repo,
@@ -494,9 +499,70 @@ def test_dry_run_does_not_write_changes(tmp_path: Path):
         alias_map={},
     )
 
-    assert changed is False
-    assert stats[0].updated_rows == 0
+    assert changed is True
+    assert stats[0].changed is True
+    assert stats[0].updated_rows == 1
+    assert any(report.action == "updated" for report in reports)
     assert ods_path.read_bytes() == before
+    assert not list(tmp_path.glob("Software_Stack_Barnard.ods.bak.*"))
+
+
+def test_cli_dry_run_summary_and_default_report_location(
+    monkeypatch, tmp_path: Path, capsys
+):
+    repo = _make_repo(tmp_path)
+    _add_easyconfigs(
+        repo,
+        "barnard",
+        "r2026",
+        {"GROMACS": ["GROMACS-2024.4-foss-2024a.eb"]},
+    )
+    datashare_dir = tmp_path / "Datashare"
+    datashare_dir.mkdir()
+    ods_path = datashare_dir / "Software_Stack_Barnard.ods"
+    _make_ods(
+        ods_path,
+        {
+            "r2026": [
+                ["Title"],
+                ["Category", "Software", "EasyConfig", "Status"],
+                ["Math", "GROMACS", "", ""],
+            ]
+        },
+    )
+    before = ods_path.read_bytes()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    exit_code = updater.main(
+        [
+            "--datashare-dir",
+            str(datashare_dir),
+            "--repo",
+            str(repo),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "=== DSS Dry-Run Reconciliation Summary ===" in output
+    assert "Sheets processed: 1" in output
+    assert "Rows scanned: 1" in output
+    assert "Rows that would be updated: 1" in output
+    assert "Files that would be updated: 1" in output
+    assert "Files written: 0" in output
+
+    reports = list((tmp_path / "home" / "dss_updater" / "reports").glob(
+        "dss_update_report_*.json"
+    ))
+    assert len(reports) == 1
+    payload = json.loads(reports[0].read_text(encoding="utf-8"))
+    assert payload["sheets"][0]["updated_rows"] == 1
+    assert payload["sheets"][0]["changed"] is True
+    assert payload["rows"][0]["action"] == "updated"
+    assert ods_path.read_bytes() == before
+    assert not list(datashare_dir.glob("*.bak.*"))
+    assert not list(datashare_dir.glob("dss_update_report_*.json"))
 
 
 def test_report_contains_sheet_level_information(tmp_path: Path):
@@ -557,6 +623,7 @@ def test_cli_defaults_to_local_nextcloud_and_barnard_ci_paths():
 
     assert args.datashare_dir == DEFAULT_DATASHARE_DIR
     assert args.repo == DEFAULT_REPO_DIR
+    assert DEFAULT_REPORT_DIR == "~/dss_updater/reports"
     assert not hasattr(args, "public_upload")
     assert not hasattr(args, "authenticated_upload")
 

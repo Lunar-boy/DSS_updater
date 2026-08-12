@@ -60,7 +60,6 @@ def reconcile_sheet(
     rows: list[list[str]],
     alias_map: dict[str, str],
     repo_root: Path,
-    dry_run: bool,
 ) -> SheetUpdateResult:
     stats = SheetStats(cluster, str(file_path), sheet_name, release)
     reports: list[RowReport] = []
@@ -108,9 +107,6 @@ def reconcile_sheet(
             reason = f"single_fuzzy_candidate:{candidates[0]}" if candidates else "no_match"
         reports.append(RowReport(cluster, str(file_path), sheet_name, release, software_name, [], "skipped", reason))
 
-    if dry_run:
-        stats.changed = False
-        stats.updated_rows = 0
     return SheetUpdateResult(stats, reports, rows, header_idx, cols)
 
 
@@ -144,14 +140,14 @@ def process_ods_file(
             rows=[list(row) for row in old_rows],
             alias_map=alias_map,
             repo_root=repo_root,
-            dry_run=dry_run,
         )
         all_stats.append(result.stats)
         all_reports.extend(result.reports)
         results.append((result, old_rows, row_elems))
 
-    if dry_run or not any(result.stats.changed for result, _, _ in results):
-        return all_stats, all_reports, False
+    changes_planned = any(result.stats.changed for result, _, _ in results)
+    if dry_run or not changes_planned:
+        return all_stats, all_reports, changes_planned
 
     workbook_changed = False
     for result, old_rows, row_elems in results:
@@ -170,8 +166,4 @@ def process_ods_file(
             original_fingerprint,
             pre_replace_check=pre_replace_check,
         )
-    else:
-        for result, _, _ in results:
-            result.stats.changed = False
-            result.stats.updated_rows = 0
     return all_stats, all_reports, workbook_changed
