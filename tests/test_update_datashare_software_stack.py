@@ -1,18 +1,28 @@
 import json
-import types
+import os
 from pathlib import Path
 
 import pytest
 
-import scripts.update_datashare_software_stack as updater
-from scripts.update_datashare_software_stack import (
-    build_public_share_dav_base,
-    extract_share_token_from_url,
-    infer_cluster_from_filename,
-    load_ods_workbook,
-    process_ods_file,
-    serialize_report,
-    upload_files_via_public_share_webdav,
+import dss_updater.cli as updater
+import dss_updater.ods as ods_module
+from dss_updater.cli import DEFAULT_DATASHARE_DIR, DEFAULT_REPO_DIR, build_arg_parser
+from dss_updater.ods import ODSValidationError, load_workbook, save_workbook_safely
+from dss_updater.reconciliation import infer_cluster_from_filename, process_ods_file
+from dss_updater.reporting import serialize_report
+from dss_updater.safety import (
+    AmbiguousWorkbookError,
+    ConcurrentModificationError,
+    LibreOfficeLockError,
+    NextcloudConflictError,
+    ProcessLockError,
+    discover_ods_files,
+    ensure_fingerprint_unchanged,
+    ensure_no_ambiguous_workbooks,
+    ensure_no_conflict_files,
+    ensure_no_libreoffice_locks,
+    fingerprint_file,
+    process_lock,
 )
 
 
@@ -91,131 +101,8 @@ def _make_ods_with_repeated_easyconfig_status_cell(path: Path) -> None:
 
 
 def _sheet_rows(path: Path) -> dict[str, list[list[str]]]:
-    _, workbook_tables = load_ods_workbook(path)
+    _, workbook_tables = load_workbook(path)
     return {sheet_name: rows for sheet_name, _, rows in workbook_tables}
-
-
-def test_extract_share_token_from_url_parses_normal_share_url():
-    share_url = "https://datashare.tu-dresden.de/s/jJPQxRTHY9fbPtR?dir=/&editing=false&openfile=true"
-    assert extract_share_token_from_url(share_url) == "jJPQxRTHY9fbPtR"
-
-
-@pytest.mark.parametrize(
-    "share_url",
-    [
-        "",
-        "datashare.tu-dresden.de/s/token",
-        "https://datashare.tu-dresden.de/no-share-path",
-        "https://datashare.tu-dresden.de/s/",
-    ],
-)
-def test_extract_share_token_from_url_rejects_malformed_urls(share_url: str):
-    with pytest.raises(ValueError):
-        extract_share_token_from_url(share_url)
-
-
-def test_build_public_share_dav_base():
-    share_url = "https://datashare.tu-dresden.de/s/jJPQxRTHY9fbPtR?dir=/&editing=false"
-    assert (
-        build_public_share_dav_base(share_url)
-        == "https://datashare.tu-dresden.de/public.php/dav/files/jJPQxRTHY9fbPtR"
-    )
-
-
-def test_public_share_upload_without_password_has_no_auth(monkeypatch, tmp_path: Path):
-    file_path = tmp_path / "Software_Stack_Barnard.ods"
-    file_path.write_text("content", encoding="utf-8")
-
-    calls = []
-
-    def fake_put(url, **kwargs):
-        calls.append((url, kwargs))
-        return types.SimpleNamespace(status_code=201)
-
-    monkeypatch.setattr(updater, "requests", types.SimpleNamespace(put=fake_put))
-
-    upload_files_via_public_share_webdav(
-        [file_path],
-        share_url="https://datashare.tu-dresden.de/s/shareToken",
-        share_password=None,
-    )
-
-    assert len(calls) == 1
-    called_url, called_kwargs = calls[0]
-    assert called_url.endswith("/public.php/dav/files/shareToken/Software_Stack_Barnard.ods")
-    assert "auth" not in called_kwargs
-
-
-def test_public_share_upload_with_password_uses_anonymous_auth(monkeypatch, tmp_path: Path):
-    file_path = tmp_path / "Software_Stack_Barnard.ods"
-    file_path.write_text("content", encoding="utf-8")
-
-    calls = []
-
-    def fake_put(url, **kwargs):
-        calls.append((url, kwargs))
-        return types.SimpleNamespace(status_code=201)
-
-    monkeypatch.setattr(updater, "requests", types.SimpleNamespace(put=fake_put))
-
-    upload_files_via_public_share_webdav(
-        [file_path],
-        share_url="https://datashare.tu-dresden.de/s/shareToken",
-        share_password="secret123",
-    )
-
-    assert len(calls) == 1
-    _, called_kwargs = calls[0]
-    assert called_kwargs["auth"] == ("anonymous", "secret123")
-
-
-@pytest.mark.parametrize(
-    "status,expected_text",
-    [
-        (401, "Wrong share password"),
-        (403, "missing upload permissions"),
-        (404, "DAV endpoint is not supported"),
-        (405, "DAV endpoint is not supported"),
-    ],
-)
-def test_public_share_upload_fails_with_clear_errors(monkeypatch, tmp_path: Path, status: int, expected_text: str):
-    file_path = tmp_path / "Software_Stack_Barnard.ods"
-    file_path.write_text("content", encoding="utf-8")
-
-    def fake_put(url, **kwargs):
-        return types.SimpleNamespace(status_code=status)
-
-    monkeypatch.setattr(updater, "requests", types.SimpleNamespace(put=fake_put))
-
-    with pytest.raises(RuntimeError) as exc:
-        upload_files_via_public_share_webdav(
-            [file_path],
-            share_url="https://datashare.tu-dresden.de/s/shareToken",
-            share_password=None,
-        )
-
-    message = str(exc.value)
-    assert f"HTTP {status}" in message
-    assert expected_text in message
-
-
-def test_public_share_upload_403_with_password_reports_wrong_password(monkeypatch, tmp_path: Path):
-    file_path = tmp_path / "Software_Stack_Barnard.ods"
-    file_path.write_text("content", encoding="utf-8")
-
-    def fake_put(url, **kwargs):
-        return types.SimpleNamespace(status_code=403)
-
-    monkeypatch.setattr(updater, "requests", types.SimpleNamespace(put=fake_put))
-
-    with pytest.raises(RuntimeError) as exc:
-        upload_files_via_public_share_webdav(
-            [file_path],
-            share_url="https://datashare.tu-dresden.de/s/shareToken",
-            share_password="wrong-password",
-        )
-
-    assert "Wrong password" in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -645,3 +532,339 @@ def test_report_contains_sheet_level_information(tmp_path: Path):
     assert payload["sheets"][0]["sheet_name"] == "r2026"
     assert payload["sheets"][0]["release"] == "r2026"
     assert payload["rows"][0]["sheet_name"] == "r2026"
+
+
+def test_discovery_only_returns_software_stack_workbooks(tmp_path: Path):
+    expected = tmp_path / "Software_Stack_Barnard.ods"
+    expected.write_bytes(b"ods")
+    (tmp_path / "unrelated.ods").write_bytes(b"ods")
+    (tmp_path / "Software_Stack_Barnard.csv").write_text("csv", encoding="utf-8")
+    (tmp_path / "software_stack_alpha.ods").write_bytes(b"ods")
+
+    assert discover_ods_files(tmp_path) == [expected]
+
+
+def test_nextcloud_conflict_file_aborts_preflight(tmp_path: Path):
+    conflict = tmp_path / "Software_Stack_Barnard (conflicted copy 2026-08-12).ods"
+    conflict.write_bytes(b"conflict")
+
+    with pytest.raises(NextcloudConflictError, match="no workbooks were modified"):
+        ensure_no_conflict_files(tmp_path)
+
+
+def test_cli_defaults_to_local_nextcloud_and_barnard_ci_paths():
+    args = build_arg_parser().parse_args([])
+
+    assert args.datashare_dir == DEFAULT_DATASHARE_DIR
+    assert args.repo == DEFAULT_REPO_DIR
+    assert not hasattr(args, "public_upload")
+    assert not hasattr(args, "authenticated_upload")
+
+
+def test_changed_ods_is_backed_up_and_atomically_replaced(tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    _add_easyconfigs(repo, "barnard", "r2026", {"GROMACS": ["GROMACS-2024.4.eb"]})
+    ods_path = tmp_path / "Software_Stack_Barnard.ods"
+    _make_ods(
+        ods_path,
+        {
+            "r2026": [
+                ["Title"],
+                ["Category", "Software", "EasyConfig", "Status"],
+                ["Math", "GROMACS", "", ""],
+            ]
+        },
+    )
+    original_inode = ods_path.stat().st_ino
+
+    _, _, changed = process_ods_file(
+        file_path=ods_path,
+        cluster="barnard",
+        repo_root=repo,
+        dry_run=False,
+        alias_map={},
+    )
+
+    assert changed is True
+    assert ods_path.stat().st_ino != original_inode
+    assert len(list(tmp_path.glob("Software_Stack_Barnard.ods.bak.*"))) == 1
+    assert not list(tmp_path.glob(".Software_Stack_Barnard.ods.*.tmp"))
+
+
+def test_cli_conflict_abort_writes_nothing(tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    datashare_dir = tmp_path / "Datashare"
+    datashare_dir.mkdir()
+    ods_path = datashare_dir / "Software_Stack_Barnard.ods"
+    ods_path.write_bytes(b"original")
+    (datashare_dir / "Software_Stack_Barnard (conflicted copy).ods").write_bytes(b"conflict")
+    report_path = tmp_path / "report.json"
+
+    with pytest.raises(SystemExit, match="no workbooks were modified"):
+        updater.main(
+            [
+                "--datashare-dir",
+                str(datashare_dir),
+                "--repo",
+                str(repo),
+                "--report-out",
+                str(report_path),
+            ]
+        )
+
+    assert ods_path.read_bytes() == b"original"
+    assert not report_path.exists()
+    assert not list(datashare_dir.glob("*.bak.*"))
+
+
+def test_alias_map_preserves_exact_matching_behavior(tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    _add_easyconfigs(repo, "barnard", "r2026", {"Canonical Name": ["Canonical-1.0.eb"]})
+    ods_path = tmp_path / "Software_Stack_Barnard.ods"
+    _make_ods(
+        ods_path,
+        {
+            "r2026": [
+                ["Title"],
+                ["Category", "Software", "EasyConfig", "Status"],
+                ["Tools", "ODS Alias", "", ""],
+            ]
+        },
+    )
+
+    _, reports, changed = process_ods_file(
+        file_path=ods_path,
+        cluster="barnard",
+        repo_root=repo,
+        dry_run=False,
+        alias_map={"ods alias": "canonical name"},
+    )
+
+    assert changed is True
+    assert any(report.software_name == "ODS Alias" and report.action == "updated" for report in reports)
+    assert _sheet_rows(ods_path)["r2026"][2][2] == "Canonical-1.0.eb"
+
+
+def test_sha256_fingerprint_detects_same_size_and_mtime_change(tmp_path: Path):
+    path = tmp_path / "Software_Stack_Barnard.ods"
+    path.write_bytes(b"original")
+    original = fingerprint_file(path)
+
+    path.write_bytes(b"modified")
+    assert path.stat().st_size == original.size
+    path.touch()
+    # Restore the recorded mtime so SHA256 is the field that detects the edit.
+    os.utime(path, ns=(original.mtime_ns, original.mtime_ns))
+
+    with pytest.raises(ConcurrentModificationError, match="changed during reconciliation"):
+        ensure_fingerprint_unchanged(path, original)
+
+
+def test_concurrent_modification_discards_staged_update(monkeypatch, tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    _add_easyconfigs(repo, "barnard", "r2026", {"GROMACS": ["GROMACS-2024.4.eb"]})
+    ods_path = tmp_path / "Software_Stack_Barnard.ods"
+    _make_ods(
+        ods_path,
+        {
+            "r2026": [
+                ["Title"],
+                ["Category", "Software", "EasyConfig", "Status"],
+                ["Math", "GROMACS", "", ""],
+            ]
+        },
+    )
+    external_bytes = ods_path.read_bytes() + b"external change"
+    real_validate = ods_module.validate_ods
+    validation_calls = 0
+
+    def validate_then_modify(path: Path) -> None:
+        nonlocal validation_calls
+        real_validate(path)
+        validation_calls += 1
+        if validation_calls == 1:
+            ods_path.write_bytes(external_bytes)
+
+    monkeypatch.setattr(ods_module, "validate_ods", validate_then_modify)
+
+    with pytest.raises(ConcurrentModificationError, match="discarded"):
+        process_ods_file(
+            file_path=ods_path,
+            cluster="barnard",
+            repo_root=repo,
+            dry_run=False,
+            alias_map={},
+        )
+
+    assert ods_path.read_bytes() == external_bytes
+    assert not list(tmp_path.glob("*.bak.*"))
+    assert not list(tmp_path.glob(".Software_Stack_Barnard.ods.*.ods.tmp"))
+
+
+def test_invalid_staged_ods_is_rejected_before_backup(tmp_path: Path):
+    ods_path = tmp_path / "Software_Stack_Barnard.ods"
+    _make_ods(ods_path, {"r2026": [["Software", "EasyConfig", "Status"]]})
+    original_bytes = ods_path.read_bytes()
+    original_fingerprint = fingerprint_file(ods_path)
+
+    class InvalidDocument:
+        def save(self, filename: str, addsuffix: bool = False) -> None:
+            Path(filename).write_bytes(b"not an ODS ZIP")
+
+    with pytest.raises(ODSValidationError, match="not a valid ZIP"):
+        save_workbook_safely(InvalidDocument(), ods_path, original_fingerprint)
+
+    assert ods_path.read_bytes() == original_bytes
+    assert not list(tmp_path.glob("*.bak.*"))
+    assert not list(tmp_path.glob(".Software_Stack_Barnard.ods.*.ods.tmp"))
+
+
+def test_relevant_libreoffice_lock_aborts(tmp_path: Path):
+    target = tmp_path / "Software_Stack_Barnard.ods"
+    target.write_bytes(b"ods")
+    lock = tmp_path / ".~lock.Software_Stack_Barnard.ods#"
+    lock.write_text("lock metadata", encoding="utf-8")
+
+    with pytest.raises(LibreOfficeLockError, match="Close the workbook"):
+        ensure_no_libreoffice_locks(tmp_path, [target])
+
+
+def test_cli_libreoffice_lock_returns_nonzero_before_reading_ods(tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    datashare_dir = tmp_path / "Datashare"
+    datashare_dir.mkdir()
+    target = datashare_dir / "Software_Stack_Barnard.ods"
+    target.write_bytes(b"not opened because preflight aborts")
+    (datashare_dir / ".~lock.Software_Stack_Barnard.ods#").write_text(
+        "lock metadata", encoding="utf-8"
+    )
+
+    with pytest.raises(SystemExit, match="LibreOffice lock"):
+        updater.main(["--datashare-dir", str(datashare_dir), "--repo", str(repo)])
+
+
+def test_process_lock_rejects_second_holder(tmp_path: Path):
+    with process_lock(tmp_path):
+        with pytest.raises(ProcessLockError, match="already running"):
+            with process_lock(tmp_path):
+                pytest.fail("second process lock should not be acquired")
+
+
+def test_cli_returns_nonzero_when_process_lock_is_held(tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    datashare_dir = tmp_path / "Datashare"
+    datashare_dir.mkdir()
+
+    with process_lock(datashare_dir):
+        with pytest.raises(SystemExit, match="already running"):
+            updater.main(["--datashare-dir", str(datashare_dir), "--repo", str(repo)])
+
+
+def test_duplicate_or_variant_cluster_workbooks_abort(tmp_path: Path):
+    canonical = tmp_path / "Software_Stack_Barnard.ods"
+    duplicate = tmp_path / "Software_Stack_Barnard (copy).ods"
+    canonical.write_bytes(b"canonical")
+    duplicate.write_bytes(b"duplicate")
+
+    with pytest.raises(AmbiguousWorkbookError, match="will not merge"):
+        ensure_no_ambiguous_workbooks(tmp_path, updater.SUPPORTED_CLUSTERS)
+
+
+def test_conflict_appearing_after_preflight_aborts_before_replace(monkeypatch, tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    _add_easyconfigs(repo, "barnard", "r2026", {"GROMACS": ["GROMACS-2024.4.eb"]})
+    datashare_dir = tmp_path / "Datashare"
+    datashare_dir.mkdir()
+    ods_path = datashare_dir / "Software_Stack_Barnard.ods"
+    _make_ods(
+        ods_path,
+        {
+            "r2026": [
+                ["Title"],
+                ["Category", "Software", "EasyConfig", "Status"],
+                ["Math", "GROMACS", "", ""],
+            ]
+        },
+    )
+    original_bytes = ods_path.read_bytes()
+    real_validate = ods_module.validate_ods
+    validation_calls = 0
+
+    def validate_then_create_conflict(path: Path) -> None:
+        nonlocal validation_calls
+        real_validate(path)
+        validation_calls += 1
+        if validation_calls == 1:
+            (datashare_dir / "Software_Stack_Barnard (conflicted copy).ods").write_bytes(
+                b"late conflict"
+            )
+
+    monkeypatch.setattr(ods_module, "validate_ods", validate_then_create_conflict)
+
+    with pytest.raises(SystemExit, match="Nextcloud conflict"):
+        updater.main(
+            [
+                "--datashare-dir",
+                str(datashare_dir),
+                "--repo",
+                str(repo),
+                "--report-out",
+                str(tmp_path / "report.json"),
+            ]
+        )
+
+    assert ods_path.read_bytes() == original_bytes
+    assert not list(datashare_dir.glob("*.bak.*"))
+    assert not list(datashare_dir.glob(".Software_Stack_Barnard.ods.*.ods.tmp"))
+    assert not (tmp_path / "report.json").exists()
+
+
+def test_libreoffice_lock_appearing_after_preflight_aborts_before_replace(
+    monkeypatch, tmp_path: Path
+):
+    repo = _make_repo(tmp_path)
+    _add_easyconfigs(repo, "barnard", "r2026", {"GROMACS": ["GROMACS-2024.4.eb"]})
+    datashare_dir = tmp_path / "Datashare"
+    datashare_dir.mkdir()
+    ods_path = datashare_dir / "Software_Stack_Barnard.ods"
+    _make_ods(
+        ods_path,
+        {
+            "r2026": [
+                ["Title"],
+                ["Category", "Software", "EasyConfig", "Status"],
+                ["Math", "GROMACS", "", ""],
+            ]
+        },
+    )
+    original_bytes = ods_path.read_bytes()
+    real_validate = ods_module.validate_ods
+    validation_calls = 0
+
+    def validate_then_create_lock(path: Path) -> None:
+        nonlocal validation_calls
+        real_validate(path)
+        validation_calls += 1
+        if validation_calls == 1:
+            (datashare_dir / ".~lock.Software_Stack_Barnard.ods#").write_text(
+                "late LibreOffice lock", encoding="utf-8"
+            )
+
+    monkeypatch.setattr(ods_module, "validate_ods", validate_then_create_lock)
+
+    with pytest.raises(SystemExit, match="LibreOffice lock"):
+        updater.main(
+            [
+                "--datashare-dir",
+                str(datashare_dir),
+                "--repo",
+                str(repo),
+                "--report-out",
+                str(tmp_path / "report.json"),
+            ]
+        )
+
+    assert ods_path.read_bytes() == original_bytes
+    assert not list(datashare_dir.glob("*.bak.*"))
+    assert not list(datashare_dir.glob(".Software_Stack_Barnard.ods.*.ods.tmp"))
+    assert not (tmp_path / "report.json").exists()

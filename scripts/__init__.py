@@ -1,1 +1,0 @@
-"""Datashare updater package."""

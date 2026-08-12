@@ -1,108 +1,161 @@
-# Datashare Software Stack Updater
+# DSS_updater
 
-`datashare-stack-update` updates Datashare software-stack files from local `barnard-ci` easyconfigs.
-
-The primary workflow is **ODS-first**:
-- each `Software_Stack_<Cluster>.ods` workbook is processed
-- **all sheets** are evaluated
-- each sheet name (for example `r24.10`, `r25.06`, `r2026`) is treated as the release
-- rows are updated with matching `.eb` filenames and status `Done`
-
-CSV is still supported as a legacy fallback, but ODS drives the architecture.
-
-## What The Tool Does
-
-For each ODS workbook:
-1. infer cluster from filename (`Software_Stack_Barnard.ods` -> `barnard`)
-2. iterate all sheets/tables in the workbook
-3. validate sheet name as release-like (`rNN.NN` or `rYYYY`)
-4. detect header row and required columns dynamically
-5. scan `barnard-ci/easyconfigs/<cluster>/<release>/*.eb`
-6. match software names (normalized matching, alias support if configured)
-7. write matching filename(s) into release/easyconfig column
-8. write status as exactly `Done`
-9. preserve workbook layout by editing ODS cells in place
-10. create backup before write and emit JSON report
-
-If a sheet name is invalid or an easyconfig directory is missing, that sheet is skipped and reported clearly.
-
-## Expected `barnard-ci` Layout
+`DSS_updater` is a local-only ODS reconciler. It reads EasyBuild easyconfigs from a local
+`barnard-ci` checkout and updates matching software-stack workbooks in a directory already
+synchronized by the Nextcloud Desktop Client.
 
 ```text
-barnard-ci/
-  easyconfigs/
-    barnard/
-      r2026/
-        GROMACS-2024.4-foss-2024a.eb
-      r25.06/
-        Julia-1.11.6-linux-x86_64.eb
-    capella/
-      r24.10/
-        ...
+barnard-ci
+    ->
+DSS_updater
+    ->
+local Nextcloud synchronized folder
+    ->
+Nextcloud Desktop Client
+    ->
+TU Dresden Datashare
 ```
 
-## Required ODS Columns
+`DSS_updater` modifies local files only. It does not connect to, authenticate with, or upload
+anything to TU Dresden Datashare. Cloud synchronization is exclusively the responsibility of
+the Nextcloud Desktop Client. The tool does not invoke `nextcloudcmd` or any other sync client.
 
-Each processed sheet must have a header row with these logical columns (names can vary):
-- software column (`Software`, `Softwares`, ...)
-- release/easyconfig column (`Release`, `EasyConfig`, ...)
-- status column (`Status`)
+## What it processes
 
-Header row is detected dynamically per sheet.
+Only regular files named `Software_Stack_*.ods` in the selected directory are discovered.
+Unrelated `.ods` files and all other file types are ignored.
+
+For each discovered workbook, the reconciler:
+
+1. infers the cluster from the filename;
+2. processes every release-named sheet (`rNN.NN` or `rYYYY`);
+3. dynamically detects the software, release/easyconfig, and status columns;
+4. indexes `barnard-ci/easyconfigs/<cluster>/<release>/*.eb`;
+5. matches normalized software names, including configured aliases;
+6. merges matching `.eb` filenames and sets the status to `Done`;
+7. creates a timestamped backup and atomically replaces a changed ODS file;
+8. writes a JSON report.
+
+Alpha sheets use the union of Alpha and Romeo easyconfigs for the same release. Other clusters
+use only their own easyconfig directory. Matches are idempotent: rerunning against unchanged
+inputs does not rewrite a workbook or add duplicate filenames.
+
+Sheets with invalid release names, missing required columns, or missing easyconfig directories
+are skipped and recorded in the report.
+
+## Local file safety
+
+The CLI holds a non-blocking, per-directory `fcntl.flock` for the entire run. A second
+`dss-update` process targeting the same directory exits with an error instead of running
+concurrently. A stale lock file is harmless because ownership is determined by the operating
+system lock, not by the file's existence.
+
+Before processing, the tool aborts if it finds:
+
+- a name containing `conflicted copy` (case-insensitive);
+- duplicate or non-canonical `Software_Stack_*.ods` variants for a known cluster; or
+- a relevant LibreOffice `.~lock.*#` file for a target workbook.
+
+Conflicts must be resolved manually; DSS_updater never attempts to merge them.
+
+Each source workbook is fingerprinted using its size, nanosecond modification time, SHA256,
+device, and inode before it is read. A changed workbook follows this write sequence:
+
+```text
+save to same-directory temporary ODS
+  -> validate ZIP integrity and reopen with odfpy
+  -> re-check conflicts, workbook variants, and LibreOffice locks
+  -> confirm the original fingerprint is unchanged
+  -> back up the original
+  -> confirm the fingerprint again
+  -> atomic os.replace()
+  -> reopen and validate the installed ODS
+```
+
+If staging validation or a fingerprint comparison fails, the generated temporary file is
+discarded and the original is not overwritten.
+
+## Expected layout
+
+```text
+~/Desktop/barnard-ci/
+  easyconfigs/
+    alpha/
+      r2026/
+        GROMACS-2024.4-foss-2024a.eb
+    romeo/
+      r2026/
+        GROMACS-2024.5-foss-2024b.eb
+
+~/Nextcloud/Shared/Software-Stack for all Cluster/
+  Software_Stack_Alpha.ods
+  Software_Stack_Barnard.ods
+```
 
 ## Install
 
-### 1. Install from source (editable)
+Python 3.10 or newer is required.
 
 ```bash
-cd /path/to/Datashare
+cd /home/nate/Desktop/DSS_updater
 python3 -m venv .venv
 source .venv/bin/activate
+python3 -m pip install -e '.[dev]'
 ```
-
-### 2. Install dev/test dependencies
-
-```bash
-python3 -m pip install -e .[dev]
-```
-### 3. Create your App password from TUD Nextcloud
-
-### 4. Put your old ods list at ~/DSS_updater 
-
 
 ## Run
 
+The defaults are:
 
+- Datashare directory: `~/Nextcloud/Shared/Software-Stack for all Cluster`
+- barnard-ci repository: `~/Desktop/barnard-ci`
 
-
-
-### Authenticated account WebDAV mode
+Preview a run without changing ODS files:
 
 ```bash
-datashare-stack-update \
-  --datashare-dir ~/Desktop/Datashare \
-  --repo ~/Desktop/barnard-ci \
-  --authenticated-upload \
-  --webdav-url "https://datashare.tu-dresden.de/remote.php/dav/files/chwu350f/Shared/Software-Stack%20for%20all%20Cluster" \
-  --webdav-username  \
-  --webdav-password 
+dss-update --dry-run
 ```
 
-You can also omit those CLI args and provide equivalent environment variables:
-- `DATASHARE_WEBDAV_URL`
-- `DATASHARE_WEBDAV_USERNAME`
-- `DATASHARE_WEBDAV_PASSWORD`
+Apply local changes:
 
+```bash
+dss-update
+```
 
-## Backups And Reports
+Select one cluster or override paths:
 
-- before writing an updated file: `<file>.bak.<timestamp>` is created
-- JSON report is written after each run (default in Datashare dir)
-- use `--report-out /path/report.json` to choose output path
+```bash
+dss-update \
+  --cluster barnard \
+  --repo /path/to/barnard-ci \
+  --datashare-dir "/path/to/local Nextcloud folder" \
+  --report-out /path/to/report.json
+```
 
-Report contains:
-- `sheets`: sheet-level processing summary (`file`, `sheet_name`, `release`, counts, skipped_reason)
-- `rows`: row-level actions and reasons
+Use `dss-update --help` for the complete local CLI. There are no upload options or cloud
+credentials.
+
+## Backups and reports
+
+Before a changed workbook is replaced, the original is copied to
+`<workbook>.bak.<timestamp>`. ODS output is written to a temporary file in the same directory
+and atomically renamed into place so the sync client does not observe a partially written ODS.
+
+The JSON report contains sheet-level counts and row-level match actions and reasons. Dry runs
+still write a report but never write or back up a workbook.
+
+## Package architecture
+
+```text
+src/dss_updater/
+  cli.py             argument parsing and run orchestration
+  models.py          shared result models
+  easyconfigs.py     EasyConfig indexing, normalization, and matching
+  ods.py             ODS loading, cell updates, and atomic saving
+  reconciliation.py domain reconciliation and Alpha/Romeo rules
+  reporting.py       JSON report serialization
+  safety.py          discovery, conflict detection, backups, atomic writes
+```
 
 ## Tests
 
