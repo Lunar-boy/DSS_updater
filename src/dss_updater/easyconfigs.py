@@ -23,6 +23,14 @@ def parse_name_from_easyconfig_content(content: str) -> str | None:
     return match.group(2).strip() or None
 
 
+def decode_easyconfig_content(content: bytes) -> str:
+    """Decode an EasyConfig using the encodings supported by the repository index."""
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("latin-1")
+
+
 def fallback_name_from_filename(filename: str) -> str:
     stem = Path(filename).stem
     parts = stem.split("-")
@@ -41,10 +49,7 @@ def read_easyconfig_index(repo_root: Path, cluster: str, release: str) -> dict[s
 
     index: dict[str, set[str]] = defaultdict(set)
     for eb_path in sorted(target_dir.glob("*.eb")):
-        try:
-            content = eb_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            content = eb_path.read_text(encoding="latin-1")
+        content = decode_easyconfig_content(eb_path.read_bytes())
         name = parse_name_from_easyconfig_content(content) or fallback_name_from_filename(eb_path.name)
         index[normalize_name(name)].add(eb_path.name)
     return {name: sorted(filenames) for name, filenames in index.items()}

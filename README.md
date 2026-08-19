@@ -1,25 +1,23 @@
 # DSS_updater
 
-`DSS_updater` is a local-only ODS reconciler. It combines the EasyConfigs available in a local
-`barnard-ci` checkout with JSON inventories generated from the actual EasyBuild installation
-tree, then updates matching software-stack workbooks in a directory already synchronized by
-the Nextcloud Desktop Client.
+`DSS_updater` provides an inventory generator and a local-only ODS reconciler. It scans the
+actual EasyBuild installation tree (locally or through an existing SSH alias), writes a local
+JSON inventory, combines that inventory with the EasyConfigs available in a local `barnard-ci`
+checkout, and updates software-stack workbooks in a directory already synchronized by the
+Nextcloud Desktop Client.
 
 ```text
-actual cluster installation -> per-release JSON inventory
-                                                    \
-barnard-ci EasyConfig index ------------------------> DSS_updater
-    ->
-local Nextcloud synchronized folder
-    ->
-Nextcloud Desktop Client
-    ->
-TU Dresden Datashare
+cluster installation -> dss-inventory -> inventory JSON
+                                             \
+barnard-ci EasyConfig index -----------------> dss-update -> local ODS
+                                                               -> Nextcloud Desktop Client
+                                                               -> TU Dresden Datashare
 ```
 
-`DSS_updater` modifies local files only. It does not connect to, authenticate with, or upload
-anything to TU Dresden Datashare. Cloud synchronization is exclusively the responsibility of
-the Nextcloud Desktop Client. The tool does not invoke `nextcloudcmd` or any other sync client.
+`dss-update` modifies local files only. `dss-inventory` can read a cluster installation over
+SSH, but always writes its JSON output locally. Neither command connects to or uploads anything
+to TU Dresden Datashare. Cloud synchronization is exclusively the responsibility of the
+Nextcloud Desktop Client. The tool does not invoke `nextcloudcmd` or any other sync client.
 
 ## What it processes
 
@@ -49,6 +47,43 @@ release names or missing required columns are skipped and recorded in the report
 (no `--inventory-dir`), missing EasyConfig directories retain their former skip behavior.
 
 ## Inventory JSON
+
+Generate an inventory on a cluster when `dss-inventory` is installed there:
+
+```bash
+dss-inventory \
+  --cluster romeo \
+  --release r2026 \
+  --software-root /software/rome/r2026 \
+  --output romeo/r2026.json
+```
+
+The default local mode recursively scans
+`<software-root>/**/easybuild/*.eb`. It uses each EasyConfig's `name` assignment, groups names
+with the same normalization used by reconciliation, and sorts and deduplicates all filenames.
+Multiple installed versions and toolchains are retained. Missing or unreadable roots and
+EasyConfigs without a recognizable name are reported as errors. The installation tree is only
+read; output parent directories are created as needed.
+
+Alternatively, collect through one of the SSH aliases already configured in `~/.ssh/config`:
+
+```bash
+dss-inventory \
+  --ssh-host romeo \
+  --cluster romeo \
+  --release r2026 \
+  --software-root /software/rome/r2026 \
+  --output ~/dss_updater/inventory/romeo/r2026.json
+```
+
+Remote mode invokes the system `ssh` command and a remote `python3`; it adds no SSH library
+dependency. The remote filesystem is scanned read-only and the resulting JSON is written on the
+machine where `dss-inventory` was invoked. Aliases such as `barnard`, `capella`, `romeo`,
+`alpha`, and `julia` work through their existing SSH configuration.
+
+Generation is deterministic: software and filenames have stable ordering. If the cluster,
+release, and collected software are unchanged, an existing canonical inventory is left byte-for-
+byte untouched and keeps its original `generated_at` timestamp.
 
 Place one UTF-8 JSON file at `<inventory-dir>/<cluster>/<release>.json`, for example
 `/srv/dss-inventory/barnard/r2026.json`. The canonical format is:
@@ -177,6 +212,21 @@ Apply local changes:
 dss-update
 ```
 
+Run the complete inventory-to-ODS workflow:
+
+```bash
+dss-inventory \
+  --ssh-host romeo \
+  --cluster romeo \
+  --release r2026 \
+  --software-root /software/rome/r2026 \
+  --output ~/dss_updater/inventory/romeo/r2026.json
+
+dss-update \
+  --cluster romeo \
+  --inventory-dir ~/dss_updater/inventory
+```
+
 Select one cluster or override paths:
 
 ```bash
@@ -214,6 +264,8 @@ files that would be updated, but never write or back up a workbook.
 ```text
 src/dss_updater/
   cli.py             argument parsing and run orchestration
+  inventory_cli.py   inventory-generation command-line interface
+  inventory_generation.py local/SSH scanning and canonical JSON generation
   models.py          shared result models
   easyconfigs.py     EasyConfig indexing, normalization, and matching
   inventory.py       installed-software JSON inventory parsing and indexing

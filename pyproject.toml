@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datashare-software-stack-updater"
 version = "0.1.0"
-description = "Local-only ODS reconciler for DSS software-stack sheets"
+description = "EasyBuild inventory generator and local ODS reconciler for DSS software-stack sheets"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 dss-update = "dss_updater.cli:main"
+dss-inventory = "dss_updater.inventory_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
