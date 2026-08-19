@@ -30,6 +30,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--datashare-dir", default=DEFAULT_DATASHARE_DIR, help="Local Nextcloud-synchronized directory")
     parser.add_argument("--repo", default=DEFAULT_REPO_DIR, help="Path to the barnard-ci repository")
+    parser.add_argument(
+        "--inventory-dir",
+        help="Directory containing <cluster>/<release>.json installation inventories",
+    )
     parser.add_argument("--cluster", choices=SUPPORTED_CLUSTERS, help="Process only files for one cluster")
     parser.add_argument("--dry-run", action="store_true", help="Compute changes without writing workbooks")
     parser.add_argument("--report-out", help="Output path for the JSON report")
@@ -42,18 +46,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
     datashare_dir = Path(args.datashare_dir).expanduser().resolve()
     repo_root = Path(args.repo).expanduser().resolve()
+    inventory_dir = Path(args.inventory_dir).expanduser().resolve() if args.inventory_dir else None
     if not datashare_dir.is_dir():
         raise SystemExit(f"Datashare directory not found: {datashare_dir}")
     if not repo_root.is_dir():
         raise SystemExit(f"Repository directory not found: {repo_root}")
+    if inventory_dir is not None and not inventory_dir.is_dir():
+        raise SystemExit(f"Inventory directory not found: {inventory_dir}")
     try:
         with process_lock(datashare_dir):
-            return _run_locked(args, datashare_dir, repo_root)
+            return _run_locked(args, datashare_dir, repo_root, inventory_dir)
     except SafetyError as exc:
         raise SystemExit(f"Safety check failed: {exc}") from exc
 
 
-def _run_locked(args: argparse.Namespace, datashare_dir: Path, repo_root: Path) -> int:
+def _run_locked(
+    args: argparse.Namespace,
+    datashare_dir: Path,
+    repo_root: Path,
+    inventory_dir: Path | None,
+) -> int:
     ods_files = discover_ods_files(datashare_dir)
     target_files = [
         file_path
@@ -81,6 +93,7 @@ def _run_locked(args: argparse.Namespace, datashare_dir: Path, repo_root: Path) 
             repo_root=repo_root,
             dry_run=args.dry_run,
             alias_map=alias_map,
+            inventory_dir=inventory_dir,
             pre_replace_check=lambda target=file_path: ensure_safe_directory_state(
                 datashare_dir, [target], SUPPORTED_CLUSTERS
             ),

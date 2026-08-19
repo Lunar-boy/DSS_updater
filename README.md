@@ -1,13 +1,14 @@
 # DSS_updater
 
-`DSS_updater` is a local-only ODS reconciler. It reads EasyBuild easyconfigs from a local
-`barnard-ci` checkout and updates matching software-stack workbooks in a directory already
-synchronized by the Nextcloud Desktop Client.
+`DSS_updater` is a local-only ODS reconciler. It combines the EasyConfigs available in a local
+`barnard-ci` checkout with JSON inventories generated from the actual EasyBuild installation
+tree, then updates matching software-stack workbooks in a directory already synchronized by
+the Nextcloud Desktop Client.
 
 ```text
-barnard-ci
-    ->
-DSS_updater
+actual cluster installation -> per-release JSON inventory
+                                                    \
+barnard-ci EasyConfig index ------------------------> DSS_updater
     ->
 local Nextcloud synchronized folder
     ->
@@ -30,9 +31,11 @@ For each discovered workbook, the reconciler:
 1. infers the cluster from the filename;
 2. processes every release-named sheet (`rNN.NN` or `rYYYY`);
 3. dynamically detects the software, release/easyconfig, and status columns;
-4. indexes `barnard-ci/easyconfigs/<cluster>/<release>/*.eb`;
-5. matches normalized software names, including configured aliases;
-6. merges matching `.eb` filenames and sets the status to `Done`;
+4. independently indexes `barnard-ci/easyconfigs/<cluster>/<release>/*.eb` and the matching
+   installation inventory;
+5. merges both sources by normalized software name and matches configured aliases;
+6. merges reconciled `.eb` filenames (including multiple versions) with `; ` and sets the
+   status to `Done` only when the software is installed;
 7. creates a timestamped backup and atomically replaces a changed ODS file;
 8. writes a JSON report.
 
@@ -40,8 +43,50 @@ Alpha sheets use the union of Alpha and Romeo easyconfigs for the same release. 
 use only their own easyconfig directory. Matches are idempotent: rerunning against unchanged
 inputs does not rewrite a workbook or add duplicate filenames.
 
-Sheets with invalid release names, missing required columns, or missing easyconfig directories
-are skipped and recorded in the report.
+When inventory reconciliation is enabled, a missing cluster/release inventory file is an empty
+inventory for that release; repository entries alone are not marked `Done`. Sheets with invalid
+release names or missing required columns are skipped and recorded in the report. In legacy mode
+(no `--inventory-dir`), missing EasyConfig directories retain their former skip behavior.
+
+## Inventory JSON
+
+Place one UTF-8 JSON file at `<inventory-dir>/<cluster>/<release>.json`, for example
+`/srv/dss-inventory/barnard/r2026.json`. The canonical format is:
+
+```json
+{
+  "cluster": "barnard",
+  "release": "r2026",
+  "generated_at": "2026-08-19T12:00:00+02:00",
+  "software": [
+    {
+      "name": "GROMACS",
+      "easyconfigs": [
+        "GROMACS-2024.4-foss-2024a.eb",
+        "GROMACS-2025.1-foss-2025a.eb"
+      ]
+    }
+  ]
+}
+```
+
+For simple generators, a top-level name-to-filename-list object is also accepted. Missing files
+are allowed and mean that nothing was observed as installed for that cluster and release.
+
+## Reconciliation policy
+
+Each normalized software name has an `in_repo` flag, an `installed` flag, and the union of its
+EasyConfig filenames:
+
+| Repository | Inventory | ODS result |
+|---|---|---|
+| present | present | Write the EasyConfig(s); status `Done`; report source `both` |
+| absent | present | Write the installed EasyConfig(s); status `Done`; report source `installed` |
+| present | absent | Leave the ODS row unchanged; report source `repo` and not installed |
+| absent | absent | Keep the row unmatched and include fuzzy-match diagnostics |
+
+If inventory input is omitted entirely, the CLI preserves its pre-inventory behavior and treats
+the repository index as installed. Supplying `--inventory-dir` opts into the policy above.
 
 ## Local file safety
 
@@ -87,6 +132,14 @@ discarded and the original is not overwritten.
       r2026/
         GROMACS-2024.5-foss-2024b.eb
 
+/srv/dss-inventory/
+  barnard/
+    r2026.json
+  alpha/
+    r2026.json
+  romeo/
+    r2026.json
+
 ~/Nextcloud/Shared/Software-Stack for all Cluster/
   Software_Stack_Alpha.ods
   Software_Stack_Barnard.ods
@@ -130,6 +183,7 @@ Select one cluster or override paths:
 dss-update \
   --cluster barnard \
   --repo /path/to/barnard-ci \
+  --inventory-dir /path/to/inventory \
   --datashare-dir "/path/to/local Nextcloud folder" \
   --report-out /path/to/report.json
 ```
@@ -151,8 +205,9 @@ By default, JSON reports are created as
 `~/dss_updater/reports/dss_update_report_YYYYMMDD_HHMMSS.json`; the report directory is
 created automatically. Use `--report-out` to override the report path.
 
-The JSON report contains sheet-level counts and row-level match actions and reasons. Dry runs
-report the rows and files that would be updated, but never write or back up a workbook.
+The JSON report contains sheet-level counts and row-level match actions and reasons. Every exact
+or alias match includes `source` with `repo`, `installed`, or `both`. Dry runs report the rows and
+files that would be updated, but never write or back up a workbook.
 
 ## Package architecture
 
@@ -161,6 +216,7 @@ src/dss_updater/
   cli.py             argument parsing and run orchestration
   models.py          shared result models
   easyconfigs.py     EasyConfig indexing, normalization, and matching
+  inventory.py       installed-software JSON inventory parsing and indexing
   ods.py             ODS loading, cell updates, and atomic saving
   reconciliation.py domain reconciliation and Alpha/Romeo rules
   reporting.py       JSON report serialization

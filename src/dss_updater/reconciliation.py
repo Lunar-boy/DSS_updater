@@ -12,9 +12,11 @@ from .easyconfigs import (
     normalize_name,
     normalize_text,
     read_merged_easyconfig_index,
+    source_clusters,
     source_dirs,
 )
-from .models import ColumnIndices, RowReport, SheetStats, SheetUpdateResult
+from .inventory import read_merged_inventory_index
+from .models import ColumnIndices, RowReport, SheetStats, SheetUpdateResult, SoftwareEntry
 from .ods import apply_updates, load_workbook, save_workbook_safely
 from .safety import fingerprint_file
 
@@ -51,6 +53,26 @@ def detect_header_row_and_columns(rows: Sequence[Sequence[str]]) -> tuple[int, C
     raise ValueError("Could not detect header row and required columns (software/release/status)")
 
 
+def build_software_index(
+    repo_index: dict[str, list[str]], inventory_index: dict[str, list[str]]
+) -> dict[str, SoftwareEntry]:
+    names = set(repo_index) | set(inventory_index)
+    return {
+        name: SoftwareEntry(
+            easyconfigs=set(repo_index.get(name, ())) | set(inventory_index.get(name, ())),
+            in_repo=name in repo_index,
+            installed=name in inventory_index,
+        )
+        for name in names
+    }
+
+
+def _entry_source(entry: SoftwareEntry) -> str:
+    if entry.in_repo and entry.installed:
+        return "both"
+    return "repo" if entry.in_repo else "installed"
+
+
 def reconcile_sheet(
     *,
     cluster: str,
@@ -60,6 +82,7 @@ def reconcile_sheet(
     rows: list[list[str]],
     alias_map: dict[str, str],
     repo_root: Path,
+    inventory_dir: Path | None = None,
 ) -> SheetUpdateResult:
     stats = SheetStats(cluster, str(file_path), sheet_name, release)
     reports: list[RowReport] = []
@@ -71,21 +94,29 @@ def reconcile_sheet(
         return SheetUpdateResult(stats, reports, rows, None, None)
 
     easyconfig_dirs = source_dirs(repo_root, cluster, release)
-    if not any(path.is_dir() for path in easyconfig_dirs):
+    if inventory_dir is None and not any(path.is_dir() for path in easyconfig_dirs):
         stats.skipped_reason = "easyconfig_directory_missing"
         reason = f"{stats.skipped_reason}:{','.join(str(path) for path in easyconfig_dirs)}"
         reports.append(RowReport(cluster, str(file_path), sheet_name, release, "", [], "skipped", reason))
         return SheetUpdateResult(stats, reports, rows, header_idx, cols)
 
-    index = read_merged_easyconfig_index(repo_root, cluster, release)
+    repo_index = read_merged_easyconfig_index(repo_root, cluster, release)
+    # With no inventory configured, preserve the original repo-only semantics.
+    inventory_index = (
+        repo_index
+        if inventory_dir is None
+        else read_merged_inventory_index(inventory_dir, source_clusters(cluster), release)
+    )
+    index = build_software_index(repo_index, inventory_index)
     for row in rows[header_idx + 1 :]:
         software_name = normalize_text(row[cols.software] if cols.software < len(row) else "")
         if not software_name:
             continue
         stats.rows_scanned += 1
         lookup_name = alias_map.get(normalize_name(software_name), normalize_name(software_name))
-        filenames = index.get(lookup_name)
-        if filenames:
+        entry = index.get(lookup_name)
+        if entry and entry.installed:
+            filenames = sorted(entry.easyconfigs)
             while len(row) <= max(cols.release, cols.status):
                 row.append("")
             merged = merge_filenames(row[cols.release], filenames)
@@ -95,7 +126,36 @@ def reconcile_sheet(
             if changed:
                 stats.updated_rows += 1
                 stats.changed = True
-            reports.append(RowReport(cluster, str(file_path), sheet_name, release, software_name, filenames, "updated" if changed else "unchanged", "exact_or_alias_match"))
+            reports.append(
+                RowReport(
+                    cluster,
+                    str(file_path),
+                    sheet_name,
+                    release,
+                    software_name,
+                    filenames,
+                    "updated" if changed else "unchanged",
+                    "exact_or_alias_match",
+                    "repo" if inventory_dir is None else _entry_source(entry),
+                )
+            )
+            continue
+
+        if entry:
+            stats.matched_rows += 1
+            reports.append(
+                RowReport(
+                    cluster,
+                    str(file_path),
+                    sheet_name,
+                    release,
+                    software_name,
+                    sorted(entry.easyconfigs),
+                    "skipped",
+                    "repo_only_not_installed",
+                    "repo",
+                )
+            )
             continue
 
         candidates = fuzzy_candidates(software_name, index)
@@ -117,6 +177,7 @@ def process_ods_file(
     repo_root: Path,
     dry_run: bool,
     alias_map: dict[str, str],
+    inventory_dir: Path | None = None,
     pre_replace_check: Callable[[], None] | None = None,
 ) -> tuple[list[SheetStats], list[RowReport], bool]:
     original_fingerprint = fingerprint_file(file_path)
@@ -140,6 +201,7 @@ def process_ods_file(
             rows=[list(row) for row in old_rows],
             alias_map=alias_map,
             repo_root=repo_root,
+            inventory_dir=inventory_dir,
         )
         all_stats.append(result.stats)
         all_reports.extend(result.reports)

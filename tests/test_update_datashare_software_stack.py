@@ -182,6 +182,44 @@ def test_main_workflow_does_not_skip_underscore_cluster_filename(tmp_path: Path)
     assert updated_rows[2][3] == "Done"
 
 
+def test_cli_inventory_dir_makes_installation_state_authoritative(tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    _add_easyconfigs(repo, "barnard", "r2026", {"GROMACS": ["GROMACS-2024.4.eb"]})
+    inventory_dir = tmp_path / "inventory"
+    inventory_dir.mkdir()
+    datashare_dir = tmp_path / "Datashare"
+    datashare_dir.mkdir()
+    ods_path = datashare_dir / "Software_Stack_Barnard.ods"
+    _make_ods(
+        ods_path,
+        {
+            "r2026": [
+                ["Software", "EasyConfig", "Status"],
+                ["GROMACS", "", ""],
+            ]
+        },
+    )
+    report_path = tmp_path / "report.json"
+
+    assert updater.main(
+        [
+            "--datashare-dir",
+            str(datashare_dir),
+            "--repo",
+            str(repo),
+            "--inventory-dir",
+            str(inventory_dir),
+            "--report-out",
+            str(report_path),
+        ]
+    ) == 0
+
+    assert _sheet_rows(ods_path)["r2026"][1][2] == ""
+    row_report = json.loads(report_path.read_text(encoding="utf-8"))["rows"][0]
+    assert row_report["source"] == "repo"
+    assert row_report["reason"] == "repo_only_not_installed"
+
+
 def test_ods_multiple_sheets_all_processed_and_release_from_sheet_name(tmp_path: Path):
     repo = _make_repo(tmp_path)
     _add_easyconfigs(
@@ -570,6 +608,7 @@ def test_cli_dry_run_summary_and_default_report_location(
     assert payload["sheets"][0]["updated_rows"] == 1
     assert payload["sheets"][0]["changed"] is True
     assert payload["rows"][0]["action"] == "updated"
+    assert payload["rows"][0]["source"] == "repo"
     assert ods_path.read_bytes() == before
     assert not list(datashare_dir.glob("*.bak.*"))
     assert not (tmp_path / "home" / "dss_updater" / "bak").exists()
@@ -634,6 +673,7 @@ def test_cli_defaults_to_local_nextcloud_and_barnard_ci_paths():
 
     assert args.datashare_dir == DEFAULT_DATASHARE_DIR
     assert args.repo == DEFAULT_REPO_DIR
+    assert args.inventory_dir is None
     assert DEFAULT_REPORT_DIR == "~/dss_updater/reports"
     assert not hasattr(args, "public_upload")
     assert not hasattr(args, "authenticated_upload")

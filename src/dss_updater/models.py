@@ -14,6 +14,13 @@ class ColumnIndices:
 
 
 @dataclass
+class SoftwareEntry:
+    easyconfigs: set[str]
+    in_repo: bool
+    installed: bool
+
+
+@dataclass
 class SheetStats:
     cluster: str
     file_path: str
@@ -38,6 +45,7 @@ class RowReport:
     matched_easyconfigs: list[str]
     action: str
     reason: str
+    source: str | None = None
 
 
 @dataclass
