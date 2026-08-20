@@ -89,21 +89,11 @@ dss-inventory \
   --release r2026 \
   --software-root /software/rome/r2026 \
   --output ~/dss_updater/inventory/romeo/r2026.json
-
+# download all the clusters software json, barnard julia alpha capella 
 dss-update \
-  --cluster romeo \
-  --inventory-dir ~/dss_updater/inventory
-```
-
-Select one cluster or override paths:
-
-```bash
-dss-update \
-  --cluster barnard \
-  --repo /path/to/barnard-ci \
-  --inventory-dir /path/to/inventory \
-  --datashare-dir "/path/to/local Nextcloud folder" \
-  --report-out /path/to/report.json
+    --repo ~/Desktop/barnard-ci \
+    --inventory-dir ~/dss_updater/inventory \
+    --datashare-dir "$HOME/Nextcloud/Shared/Software-Stack for all Cluster"
 ```
 
 Use `dss-update --help` for the complete local CLI. There are no upload options or cloud
